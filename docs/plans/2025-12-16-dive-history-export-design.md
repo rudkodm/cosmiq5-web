@@ -6,7 +6,7 @@
 
 ## 1. Overview
 
-This feature adds dive history export and visualization to the Cosmiq 5 web manager. Users will be able to download their dive logs via Bluetooth and immediately view depth/time profiles rendered on HTML Canvas, with no external dependencies or Python scripts required.
+This feature adds dive history export and visualization to the Cosmiq 5 web manager. Users will be able to download their dive logs via Bluetooth and immediately view depth/time profiles rendered as inline SVG, with no external dependencies or Python scripts required.
 
 ### Success Criteria
 - **Minimum Viable:** Users can download dive logs and view depth/time profile graphs in the browser
@@ -14,9 +14,17 @@ This feature adds dive history export and visualization to the Cosmiq 5 web mana
 
 ### Design Constraints
 - Zero external dependencies (no Chart.js, no matplotlib)
-- Pure HTML5 Canvas + vanilla JavaScript
+- Pure HTML5 SVG + vanilla JavaScript (no Canvas)
 - All processing in-memory (no file downloads required)
 - Consistent with existing codebase style (single HTML file)
+
+### Why SVG Over Canvas?
+- **Declarative:** Easier to debug and inspect in DevTools
+- **Scalable:** Crisp at any resolution, responsive by default
+- **CSS styleable:** Can use existing CSS variables and animations
+- **Interactive:** Easy to add tooltips and hover effects
+- **Exportable:** Can save as .svg file for use in reports
+- **Accessible:** Screen readers can parse SVG text elements
 
 ## 2. Architecture
 
@@ -35,7 +43,7 @@ Parse headers (72 bytes each → dive metadata)
     ↓
 Parse body (binary depth samples)
     ↓
-Render on Canvas (depth vs time graph)
+Render as SVG (depth vs time graph)
     ↓
 [Optional] Export to UDDF/Subsurface format
 ```
@@ -50,18 +58,20 @@ Render on Canvas (depth vs time graph)
 
 **B. Binary Parser Module** (new - port from Python)
 - `parseHeaders(hexString)` → Array of dive metadata objects
-- `parseBody(hexString, header)` → Array of depth samples
+- `parseSamples(hexString, header)` → Array of depth samples
 - Handle little-endian byte unpacking in JavaScript
 
-**C. Canvas Renderer Module** (new)
-- `renderDiveProfile(canvas, samples, metadata)` → void
-- Draw axes, grid lines, labels
-- Plot depth samples as connected line
+**C. SVG Renderer Module** (new)
+- `renderDiveProfile(containerId, samples, metadata)` → void
+- Generate SVG elements: axes, grid lines, labels
+- Plot depth samples as `<polyline>` or `<path>`
 - Handle axis inversion (depth increases downward)
+- Style with CSS variables from existing theme
 
 **D. Export Module** (future enhancement)
 - `exportToUDDF(dives)` → XML string
 - `exportToSubsurface(dives)` → XML string
+- `exportToSVG()` → Save current SVG as file
 - Trigger browser download of generated file
 
 ## 3. Data Structures
@@ -250,103 +260,182 @@ function readInt16LE(bytes, offset) {
 }
 ```
 
-### Part 3: Canvas Rendering
+### Part 3: SVG Rendering
 
 **Render Dive Profile:**
 ```javascript
-function renderDiveProfile(canvasId, samples, metadata) {
-    const canvas = document.getElementById(canvasId);
-    const ctx = canvas.getContext('2d');
+function renderDiveProfile(containerId, samples, metadata) {
+    const container = document.getElementById(containerId);
 
-    // Set canvas size
-    canvas.width = 800;
-    canvas.height = 500;
-
-    // Calculate dimensions
+    // SVG dimensions
+    const width = 800;
+    const height = 500;
     const padding = 60;
-    const graphWidth = canvas.width - 2 * padding;
-    const graphHeight = canvas.height - 2 * padding;
+    const graphWidth = width - 2 * padding;
+    const graphHeight = height - 2 * padding;
 
     // Find data bounds
     const maxDepth = Math.max(...samples.map(s => s.depthMeters));
     const maxTime = Math.max(...samples.map(s => s.timeSeconds));
 
-    // Clear canvas
-    ctx.fillStyle = '#f8f9fa';
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    // Start building SVG
+    let svg = `<svg width="${width}" height="${height}" xmlns="http://www.w3.org/2000/svg" style="background: var(--bg); font-family: var(--mono);">`;
 
-    // Draw grid
-    ctx.strokeStyle = '#e0e0e0';
-    ctx.lineWidth = 1;
+    // Title
+    const title = `Dive #${metadata.logNumber} - ${metadata.date.year}/${metadata.date.month}/${metadata.date.day} ${metadata.date.hour}:${String(metadata.date.minute).padStart(2, '0')}`;
+    svg += `<text x="${width / 2}" y="30" text-anchor="middle" font-size="16" font-weight="bold" fill="var(--text)">${title}</text>`;
 
-    // Horizontal grid lines (depth)
+    // Draw grid - horizontal lines (depth)
     const depthStep = Math.ceil(maxDepth / 5);
     for (let d = 0; d <= maxDepth; d += depthStep) {
         const y = padding + (d / maxDepth) * graphHeight;
-        ctx.beginPath();
-        ctx.moveTo(padding, y);
-        ctx.lineTo(padding + graphWidth, y);
-        ctx.stroke();
+
+        // Grid line
+        svg += `<line x1="${padding}" y1="${y}" x2="${padding + graphWidth}" y2="${y}" stroke="#e0e0e0" stroke-width="1"/>`;
 
         // Label
-        ctx.fillStyle = '#666';
-        ctx.font = '12px monospace';
-        ctx.textAlign = 'right';
-        ctx.fillText(`${d}m`, padding - 10, y + 4);
+        svg += `<text x="${padding - 10}" y="${y + 4}" text-anchor="end" font-size="12" fill="#666">${d}m</text>`;
     }
 
-    // Vertical grid lines (time)
+    // Draw grid - vertical lines (time)
     const timeStep = Math.ceil(maxTime / 10 / 60) * 60; // Round to minutes
     for (let t = 0; t <= maxTime; t += timeStep) {
         const x = padding + (t / maxTime) * graphWidth;
-        ctx.beginPath();
-        ctx.moveTo(x, padding);
-        ctx.lineTo(x, padding + graphHeight);
-        ctx.stroke();
+
+        // Grid line
+        svg += `<line x1="${x}" y1="${padding}" x2="${x}" y2="${padding + graphHeight}" stroke="#e0e0e0" stroke-width="1"/>`;
 
         // Label
-        ctx.fillStyle = '#666';
-        ctx.font = '12px monospace';
-        ctx.textAlign = 'center';
-        ctx.fillText(`${Math.floor(t / 60)}min`, x, canvas.height - padding + 20);
+        svg += `<text x="${x}" y="${height - padding + 20}" text-anchor="middle" font-size="12" fill="#666">${Math.floor(t / 60)}min</text>`;
     }
 
-    // Draw axes
-    ctx.strokeStyle = '#333';
-    ctx.lineWidth = 2;
-    ctx.strokeRect(padding, padding, graphWidth, graphHeight);
+    // Draw axes border
+    svg += `<rect x="${padding}" y="${padding}" width="${graphWidth}" height="${graphHeight}" fill="none" stroke="#333" stroke-width="2"/>`;
 
-    // Plot dive profile
-    ctx.strokeStyle = '#007bff';
-    ctx.lineWidth = 2;
-    ctx.beginPath();
+    // Plot dive profile as polyline
+    const points = samples.map(s => {
+        const x = padding + (s.timeSeconds / maxTime) * graphWidth;
+        const y = padding + (s.depthMeters / maxDepth) * graphHeight;
+        return `${x},${y}`;
+    }).join(' ');
 
-    samples.forEach((sample, idx) => {
-        const x = padding + (sample.timeSeconds / maxTime) * graphWidth;
-        const y = padding + (sample.depthMeters / maxDepth) * graphHeight;
+    svg += `<polyline points="${points}" fill="none" stroke="var(--blue)" stroke-width="2"/>`;
 
-        if (idx === 0) {
-            ctx.moveTo(x, y);
-        } else {
-            ctx.lineTo(x, y);
-        }
+    // Add area fill for visual appeal (optional)
+    const areaPoints = `${padding},${padding} ${points} ${padding + graphWidth},${padding}`;
+    svg += `<polygon points="${areaPoints}" fill="var(--blue)" opacity="0.1"/>`;
+
+    // Draw stats at bottom
+    svg += `<text x="${padding}" y="${height - 10}" font-size="12" fill="var(--text)">Max Depth: ${metadata.maxDepthMeters.toFixed(1)}m</text>`;
+    svg += `<text x="${padding + 200}" y="${height - 10}" font-size="12" fill="var(--text)">Duration: ${metadata.durationMinutes}min</text>`;
+    svg += `<text x="${padding + 400}" y="${height - 10}" font-size="12" fill="var(--text)">Min Temp: ${metadata.minTempCelsius.toFixed(1)}°C</text>`;
+
+    svg += '</svg>';
+
+    // Insert SVG into container
+    container.innerHTML = svg;
+}
+```
+
+**Alternative: Generate SVG DOM Elements (More Interactive)**
+
+For better interactivity (tooltips, hover effects), you can create actual DOM elements instead of string concatenation:
+
+```javascript
+function renderDiveProfileDOM(containerId, samples, metadata) {
+    const container = document.getElementById(containerId);
+    container.innerHTML = ''; // Clear previous content
+
+    // Create SVG element
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    svg.setAttribute('width', 800);
+    svg.setAttribute('height', 500);
+    svg.style.background = 'var(--bg)';
+    svg.style.fontFamily = 'var(--mono)';
+
+    const width = 800;
+    const height = 500;
+    const padding = 60;
+    const graphWidth = width - 2 * padding;
+    const graphHeight = height - 2 * padding;
+
+    const maxDepth = Math.max(...samples.map(s => s.depthMeters));
+    const maxTime = Math.max(...samples.map(s => s.timeSeconds));
+
+    // Helper to create SVG elements
+    function createSVGElement(type, attrs) {
+        const el = document.createElementNS('http://www.w3.org/2000/svg', type);
+        Object.entries(attrs).forEach(([key, value]) => {
+            el.setAttribute(key, value);
+        });
+        return el;
+    }
+
+    // Title
+    const title = createSVGElement('text', {
+        x: width / 2,
+        y: 30,
+        'text-anchor': 'middle',
+        'font-size': 16,
+        'font-weight': 'bold',
+        fill: 'var(--text)'
+    });
+    title.textContent = `Dive #${metadata.logNumber} - ${metadata.date.year}/${metadata.date.month}/${metadata.date.day}`;
+    svg.appendChild(title);
+
+    // Grid and axes (similar to string version)
+    // ... [grid code omitted for brevity]
+
+    // Plot polyline
+    const points = samples.map(s => {
+        const x = padding + (s.timeSeconds / maxTime) * graphWidth;
+        const y = padding + (s.depthMeters / maxDepth) * graphHeight;
+        return `${x},${y}`;
+    }).join(' ');
+
+    const polyline = createSVGElement('polyline', {
+        points: points,
+        fill: 'none',
+        stroke: 'var(--blue)',
+        'stroke-width': 2
+    });
+    svg.appendChild(polyline);
+
+    // Add interactive circles at data points (optional)
+    samples.forEach(s => {
+        const x = padding + (s.timeSeconds / maxTime) * graphWidth;
+        const y = padding + (s.depthMeters / maxDepth) * graphHeight;
+
+        const circle = createSVGElement('circle', {
+            cx: x,
+            cy: y,
+            r: 3,
+            fill: 'var(--blue)',
+            opacity: 0
+        });
+
+        // Add tooltip on hover
+        circle.addEventListener('mouseenter', (e) => {
+            circle.setAttribute('opacity', 1);
+            circle.setAttribute('r', 5);
+            // Show tooltip with depth and time
+            const tooltip = document.getElementById('diveTooltip');
+            tooltip.innerText = `${s.depthMeters.toFixed(1)}m @ ${Math.floor(s.timeSeconds / 60)}:${String(s.timeSeconds % 60).padStart(2, '0')}`;
+            tooltip.style.display = 'block';
+            tooltip.style.left = e.pageX + 'px';
+            tooltip.style.top = e.pageY + 'px';
+        });
+
+        circle.addEventListener('mouseleave', () => {
+            circle.setAttribute('opacity', 0);
+            circle.setAttribute('r', 3);
+            document.getElementById('diveTooltip').style.display = 'none';
+        });
+
+        svg.appendChild(circle);
     });
 
-    ctx.stroke();
-
-    // Draw title
-    ctx.fillStyle = '#212529';
-    ctx.font = 'bold 16px sans-serif';
-    ctx.textAlign = 'center';
-    const title = `Dive #${metadata.logNumber} - ${metadata.date.year}/${metadata.date.month}/${metadata.date.day} ${metadata.date.hour}:${metadata.date.minute}`;
-    ctx.fillText(title, canvas.width / 2, 30);
-
-    // Draw stats
-    ctx.font = '12px monospace';
-    ctx.textAlign = 'left';
-    ctx.fillText(`Max Depth: ${metadata.maxDepthMeters.toFixed(1)}m`, padding, canvas.height - 10);
-    ctx.fillText(`Duration: ${metadata.durationMinutes}min`, padding + 200, canvas.height - 10);
-    ctx.fillText(`Min Temp: ${metadata.minTempCelsius.toFixed(1)}°C`, padding + 400, canvas.height - 10);
+    container.appendChild(svg);
 }
 ```
 
@@ -376,7 +465,11 @@ function renderDiveProfile(canvasId, samples, metadata) {
         <div id="diveCards"></div>
     </div>
 
-    <canvas id="diveCanvas" style="display:none; margin-top:20px;"></canvas>
+    <!-- SVG container for dive profile -->
+    <div id="diveGraphContainer" style="display:none; margin-top:20px;"></div>
+
+    <!-- Tooltip for interactive hover (optional) -->
+    <div id="diveTooltip" style="display:none; position:absolute; background:#333; color:white; padding:5px 10px; border-radius:5px; font-size:12px; pointer-events:none; z-index:1000;"></div>
 </div>
 ```
 
@@ -440,12 +533,12 @@ function processDiveLogs() {
 function viewDive(header, bodyHex) {
     const samples = parseSamples(bodyHex, header);
 
-    const canvas = document.getElementById('diveCanvas');
-    canvas.style.display = 'block';
-    renderDiveProfile('diveCanvas', samples, header);
+    const container = document.getElementById('diveGraphContainer');
+    container.style.display = 'block';
+    renderDiveProfile('diveGraphContainer', samples, header);
 
-    // Scroll to canvas
-    canvas.scrollIntoView({ behavior: 'smooth' });
+    // Scroll to graph
+    container.scrollIntoView({ behavior: 'smooth' });
 }
 ```
 
@@ -526,23 +619,28 @@ Subsurface uses a custom XML dialect. Similar approach to UDDF but different sch
 - **Multiple dives:** Verify sector offset calculations work correctly
 
 ### Visual Tests
-- **Canvas rendering:** Compare graphs to Python matplotlib output
+- **SVG rendering:** Compare graphs to Python matplotlib output
+- **Scalability:** Test at different viewport sizes, ensure SVG scales properly
 - **UI responsiveness:** Test on mobile browsers (Chrome Android)
-- **Accessibility:** Ensure readable fonts, sufficient contrast
+- **Accessibility:** Ensure readable fonts, sufficient contrast, text elements readable by screen readers
+- **Interactivity:** Test hover effects and tooltips (if implemented)
 
 ## 7. Rollout Plan
 
 ### Phase 1: Core MVP (Recommended for initial PR)
 - Reuse BLE download code from branch
 - Implement JS binary parser
-- Implement Canvas renderer
+- Implement SVG renderer (string-based approach for simplicity)
 - Add simple dive list UI
 - Test with real device
 
 ### Phase 2: Polish
+- Enhance with DOM-based SVG for interactivity
+- Add hover tooltips showing depth/time details
 - Add loading animations
 - Error handling and retry logic
 - Export to raw JSON (backup option)
+- Export current SVG as downloadable .svg file
 - Documentation updates
 
 ### Phase 3: Export Formats (Future)
@@ -555,10 +653,24 @@ Subsurface uses a custom XML dialect. Similar approach to UDDF but different sch
 1. **Branch strategy:** Revive `divelog_download_parse` or start fresh from `main`?
 2. **Storage:** Should parsed dives be cached in memory during session?
 3. **Large datasets:** Device might have 50+ dives - pagination needed?
-4. **Mobile support:** Canvas rendering on small screens - responsive design?
+4. **Mobile support:** SVG rendering on small screens - make responsive with viewBox?
+5. **Interactivity:** Start with simple string-based SVG or implement DOM-based for tooltips in MVP?
 
 ## 9. Summary
 
-This design provides a pure JavaScript, zero-dependency solution for dive log visualization. By porting the Python parsing logic to the browser and rendering with Canvas, users get immediate feedback without installing tools or saving files. The architecture maintains the project's philosophy of being a single, self-contained HTML file that works entirely offline after initial load.
+This design provides a pure JavaScript, zero-dependency solution for dive log visualization. By porting the Python parsing logic to the browser and rendering with inline SVG, users get immediate feedback without installing tools or saving files. The architecture maintains the project's philosophy of being a single, self-contained HTML file that works entirely offline after initial load.
 
-The implementation reuses most of the BLE download code from the existing branch, adds ~300 lines of parsing logic, and ~150 lines of Canvas rendering code - keeping the total addition modest and maintainable.
+**Key Benefits of SVG Approach:**
+- Declarative markup is easier to debug than imperative Canvas commands
+- Scalable graphics work perfectly on any screen size or resolution
+- Can leverage existing CSS variables and styling
+- Easy to add interactivity (hover effects, tooltips) in Phase 2
+- Can export graphs as .svg files for use in reports
+
+**Implementation Size:**
+- Reuse ~200 lines of BLE download code from existing branch
+- Add ~300 lines of binary parsing logic
+- Add ~100 lines of SVG rendering code (string-based)
+- Add ~50 lines of UI orchestration
+
+**Total: ~450 lines of new code** - keeping the addition modest and maintainable while delivering full dive log visualization capability.
