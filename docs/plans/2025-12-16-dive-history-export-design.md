@@ -31,50 +31,152 @@ This feature adds dive history export and visualization to the Cosmiq 5 web mana
 ### High-Level Flow
 
 ```
-User clicks "Download Logs"
-    ↓
-Send BLE commands (#41 header, #43 body)
-    ↓
-Device streams packets (0x42 header, 0x44 body)
-    ↓
-Collect packets in memory (hex strings)
-    ↓
-Parse headers (72 bytes each → dive metadata)
-    ↓
-Parse body (binary depth samples)
-    ↓
-Render as SVG (depth vs time graph)
-    ↓
-[Optional] Export to UDDF/Subsurface format
+┌─────────────────────────────────────────────────────────────────┐
+│                    PHASE 1: DATA ACQUISITION                    │
+│                  (Export from Device → Memory)                  │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  User clicks "Download Logs"                                    │
+│         ↓                                                       │
+│  Send BLE commands (#41 header, #43 body)                       │
+│         ↓                                                       │
+│  Device streams packets (0x42 header, 0x44 body)                │
+│         ↓                                                       │
+│  Collect packets in memory (hex strings)                        │
+│         ↓                                                       │
+│  Parse headers (72 bytes → dive metadata objects)               │
+│         ↓                                                       │
+│  Parse body (binary → depth sample arrays)                      │
+│         ↓                                                       │
+│  Store in diveDatabase (in-memory cache)                        │
+│                                                                 │
+└─────────────────────┬───────────────────────────────────────────┘
+                      │
+                      │ Well-defined data structure
+                      │ (Array of dive objects)
+                      │
+┌─────────────────────▼───────────────────────────────────────────┐
+│                   PHASE 2: DATA CONSUMPTION                     │
+│                  (Visualize / Export / Analyze)                 │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  ┌─────────────────────────────────────────────────────┐       │
+│  │ VISUALIZATION (MVP)                                 │       │
+│  │  • Show dive list                                   │       │
+│  │  • Render SVG depth/time graphs                     │       │
+│  │  • Interactive tooltips (Phase 2)                   │       │
+│  └─────────────────────────────────────────────────────┘       │
+│                                                                 │
+│  ┌─────────────────────────────────────────────────────┐       │
+│  │ EXPORT (Future)                                     │       │
+│  │  • UDDF format (Subsurface compatible)              │       │
+│  │  • CSV for spreadsheets                             │       │
+│  │  • JSON raw data backup                             │       │
+│  │  • SVG graph download                               │       │
+│  └─────────────────────────────────────────────────────┘       │
+│                                                                 │
+│  ┌─────────────────────────────────────────────────────┐       │
+│  │ ANALYTICS (Future)                                  │       │
+│  │  • Dive statistics                                  │       │
+│  │  • Multi-dive comparison                            │       │
+│  │  • Safety analysis                                  │       │
+│  └─────────────────────────────────────────────────────┘       │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
 ```
+
+**Key Design Principle:** Phase 1 and Phase 2 are completely decoupled. The `diveDatabase` in-memory storage is the single interface between them. This makes it trivial to add new export formats or visualization types without touching the BLE/parsing code.
 
 ### Component Breakdown
 
+The architecture is split into **two distinct phases** for clean separation of concerns:
+
+---
+
+### **PHASE 1: Data Acquisition** (Export from device → memory)
+
+This phase is responsible for getting dive data from the device and storing it as structured JavaScript objects.
+
 **A. BLE Download Module** (exists in `divelog_download_parse` branch)
 - Manages packet collection state
-- Sends header/body request commands
-- Accumulates incoming hex strings
+- Sends header/body request commands (`#41`, `#43`)
+- Accumulates incoming hex strings from device responses (`0x42`, `0x44`)
 - Shows download progress
+- **Output:** Raw hex strings (header + body)
 
 **B. Binary Parser Module** (new - port from Python)
-- `parseHeaders(hexString)` → Array of dive metadata objects
-- `parseSamples(hexString, header)` → Array of depth samples
+- `parseHeaders(hexString)` → Array of `DiveHeader` objects
+- `parseSamples(bodyHex, header)` → Array of `DiveSample` objects
 - Handle little-endian byte unpacking in JavaScript
+- **Output:** Structured dive data in memory
 
-**C. SVG Renderer Module** (new)
-- `renderDiveProfile(containerId, samples, metadata)` → void
+**C. Data Storage Module** (new)
+- `diveDatabase` - In-memory storage for parsed dives
+- `cacheDive(header, samples)` → Store a single dive
+- `getAllDives()` → Retrieve all cached dives
+- `getDive(logNumber)` → Retrieve specific dive
+- `clearCache()` → Reset storage
+- **Purpose:** Single source of truth for dive data during session
+
+**Key principle:** Phase 1 outputs a well-defined data structure that Phase 2 can consume in any way.
+
+---
+
+### **PHASE 2: Data Consumption** (Visualize / Export)
+
+This phase decides **what to do** with the dive data - display it, export it, analyze it, etc. All modules in this phase are **independent and extensible**.
+
+**D. Visualization Module** (new)
+- `renderDiveList(dives)` → Show list of available dives
+- `renderDiveProfile(dive, containerId)` → Generate SVG visualization
 - Generate SVG elements: axes, grid lines, labels
 - Plot depth samples as `<polyline>` or `<path>`
-- Handle axis inversion (depth increases downward)
 - Style with CSS variables from existing theme
+- **Future:** Could add different chart types (3D, comparative, heat maps, etc.)
 
-**D. Export Module** (future enhancement)
-- `exportToUDDF(dives)` → XML string
-- `exportToSubsurface(dives)` → XML string
-- `exportToSVG()` → Save current SVG as file
-- Trigger browser download of generated file
+**E. Export Modules** (future enhancement)
+- `exportToUDDF(dives)` → Universal Dive Data Format XML
+- `exportToSubsurface(dives)` → Subsurface XML dialect
+- `exportToCSV(dives)` → Spreadsheet-friendly format
+- `exportToJSON(dives)` → Raw data backup
+- `exportCurrentSVG()` → Save displayed graph as .svg file
+- **Future:** Could add Garmin, Shearwater, MacDive formats, etc.
+
+**F. Analytics Module** (future enhancement)
+- Calculate dive statistics (avg depth, max time, etc.)
+- Compare dives over time
+- Generate reports
+
+---
+
+**Benefits of this separation:**
+1. **Testable:** Can test parsing independently from visualization
+2. **Reusable:** Same data can feed multiple outputs (SVG + UDDF + CSV)
+3. **Extensible:** Easy to add new export formats or visualizations
+4. **Maintainable:** Changes to visualization don't affect data acquisition
+5. **Cacheable:** Once downloaded, data persists in memory for the session
 
 ## 3. Data Structures
+
+**These data structures form the contract between Phase 1 (acquisition) and Phase 2 (consumption).**
+
+### In-Memory Storage
+
+```javascript
+// Global storage for parsed dive data
+const diveDatabase = {
+    dives: [],           // Array of complete dive objects
+    rawBodyHex: '',      // Cached body hex for re-parsing if needed
+    lastDownload: null   // Timestamp of last download
+};
+
+// Complete dive object combining header + samples
+const completeDive = {
+    header: DiveHeader,     // Metadata (see below)
+    samples: [DiveSample],  // Array of depth/time samples (see below)
+    parsed: Date.now()      // When this was parsed
+};
+```
 
 ### Dive Header Object
 ```javascript
@@ -473,8 +575,17 @@ function renderDiveProfileDOM(containerId, samples, metadata) {
 </div>
 ```
 
-**Orchestration Function:**
+**Orchestration Functions:**
+
 ```javascript
+// =============================================================================
+// PHASE 1: DATA ACQUISITION
+// =============================================================================
+
+/**
+ * Initiates BLE download of all dive logs from device.
+ * This is the entry point for Phase 1.
+ */
 async function downloadDiveLogs() {
     // Show progress UI
     document.getElementById('downloadProgress').style.display = 'block';
@@ -485,17 +596,21 @@ async function downloadDiveLogs() {
     dumpState.phase = 0;
     dumpState.packets = [];
 
-    // Request header
+    // Request header (metadata about all dives)
     await sendStatic("#41BD0200", "Request Header");
 
     // Body request happens automatically in handleRX when header completes
     // When all packets collected, handleRX calls processDiveLogs()
 }
 
+/**
+ * Processes downloaded hex data and stores it in memory.
+ * This completes Phase 1 and transitions to Phase 2.
+ */
 function processDiveLogs() {
     document.getElementById('downloadStatus').innerText = 'Processing...';
 
-    // Separate header and body packets
+    // Separate header and body packets from raw BLE stream
     const headerHex = dumpState.packets
         .filter(p => p.startsWith('42'))
         .map(p => p.substring(6))  // Strip command/checksum/length
@@ -506,39 +621,120 @@ function processDiveLogs() {
         .map(p => p.substring(6))
         .join('');
 
-    // Parse
-    const dives = parseHeaders(headerHex);
+    // Parse headers to get dive metadata
+    const headers = parseHeaders(headerHex);
 
-    // Display dive list
+    // Store in memory for Phase 2 consumption
+    diveDatabase.dives = headers.map(header => ({
+        header: header,
+        samples: null  // Lazy-load samples when needed
+    }));
+    diveDatabase.rawBodyHex = bodyHex;
+    diveDatabase.lastDownload = Date.now();
+
+    console.log(`Phase 1 complete: ${diveDatabase.dives.length} dives stored in memory`);
+
+    // Hide download UI
+    document.getElementById('downloadProgress').style.display = 'none';
+
+    // Transition to Phase 2: Show dive list
+    showDiveList();
+}
+
+// =============================================================================
+// PHASE 2: DATA CONSUMPTION - VISUALIZATION
+// =============================================================================
+
+/**
+ * Displays list of available dives from memory.
+ * Consumes data from Phase 1 (diveDatabase).
+ */
+function showDiveList() {
+    const dives = diveDatabase.dives;
+
+    if (dives.length === 0) {
+        log('No dives found in memory. Download first.', 'warn');
+        return;
+    }
+
     const diveCards = document.getElementById('diveCards');
     diveCards.innerHTML = '';
 
-    dives.forEach(dive => {
+    dives.forEach((dive, index) => {
+        const h = dive.header;
         const card = document.createElement('div');
         card.className = 'card';
         card.style.cursor = 'pointer';
         card.innerHTML = `
-            <h4>Dive #${dive.logNumber}</h4>
-            <p>${dive.date.year}/${dive.date.month}/${dive.date.day} ${dive.date.hour}:${String(dive.date.minute).padStart(2, '0')}</p>
-            <p>Max Depth: ${dive.maxDepthMeters.toFixed(1)}m | Duration: ${dive.durationMinutes}min</p>
+            <h4>Dive #${h.logNumber}</h4>
+            <p>${h.date.year}/${h.date.month}/${h.date.day} ${h.date.hour}:${String(h.date.minute).padStart(2, '0')}</p>
+            <p>Max Depth: ${h.maxDepthMeters.toFixed(1)}m | Duration: ${h.durationMinutes}min</p>
         `;
-        card.onclick = () => viewDive(dive, bodyHex);
+        card.onclick = () => viewDive(index);
         diveCards.appendChild(card);
     });
 
     document.getElementById('diveList').style.display = 'block';
-    document.getElementById('downloadProgress').style.display = 'none';
 }
 
-function viewDive(header, bodyHex) {
-    const samples = parseSamples(bodyHex, header);
+/**
+ * Renders SVG visualization for a specific dive.
+ * Lazy-loads samples from cached body hex if not already parsed.
+ */
+function viewDive(diveIndex) {
+    const dive = diveDatabase.dives[diveIndex];
 
+    // Lazy-load samples if not already parsed
+    if (!dive.samples) {
+        dive.samples = parseSamples(diveDatabase.rawBodyHex, dive.header);
+        console.log(`Parsed ${dive.samples.length} samples for dive #${dive.header.logNumber}`);
+    }
+
+    // Render SVG
     const container = document.getElementById('diveGraphContainer');
     container.style.display = 'block';
-    renderDiveProfile('diveGraphContainer', samples, header);
+    renderDiveProfile('diveGraphContainer', dive.samples, dive.header);
 
     // Scroll to graph
     container.scrollIntoView({ behavior: 'smooth' });
+}
+
+// =============================================================================
+// PHASE 2: DATA CONSUMPTION - EXPORT (FUTURE)
+// =============================================================================
+
+/**
+ * Exports all dives to UDDF format.
+ * Consumes data from Phase 1 (diveDatabase).
+ */
+function exportToUDDF() {
+    const dives = diveDatabase.dives;
+
+    // Ensure all samples are loaded
+    dives.forEach(dive => {
+        if (!dive.samples) {
+            dive.samples = parseSamples(diveDatabase.rawBodyHex, dive.header);
+        }
+    });
+
+    // Generate UDDF XML (implementation in Section 5)
+    const xml = generateUDDFXML(dives);
+
+    // Trigger download
+    downloadFile('cosmiq5_dives.uddf', xml, 'application/xml');
+}
+
+/**
+ * Helper: Trigger browser download of generated file.
+ */
+function downloadFile(filename, content, mimeType) {
+    const blob = new Blob([content], { type: mimeType });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    a.click();
+    URL.revokeObjectURL(url);
 }
 ```
 
