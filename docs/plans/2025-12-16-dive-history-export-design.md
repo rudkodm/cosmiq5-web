@@ -36,8 +36,10 @@ This feature adds dive history export and visualization to the Cosmiq 5 web mana
 │                  (Export from Device → Memory)                  │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                 │
-│  User clicks "Download Logs"                                    │
+│  User clicks "Dive History" tab                                 │
 │         ↓                                                       │
+│  Check if data already in memory                                │
+│         ↓ (if not cached)                                       │
 │  Send BLE commands (#41 header, #43 body)                       │
 │         ↓                                                       │
 │  Device streams packets (0x42 header, 0x44 body)                │
@@ -62,8 +64,10 @@ This feature adds dive history export and visualization to the Cosmiq 5 web mana
 │                                                                 │
 │  ┌─────────────────────────────────────────────────────┐       │
 │  │ VISUALIZATION (MVP)                                 │       │
-│  │  • Show dive list                                   │       │
-│  │  • Render SVG depth/time graphs                     │       │
+│  │  • Navigate between dives (← → buttons or swipe)    │       │
+│  │  • Show current dive metadata (date, depth, time)   │       │
+│  │  • Render SVG depth/time graph for current dive     │       │
+│  │  • Dive counter (e.g., "Dive 2 of 15")              │       │
 │  │  • Interactive tooltips (Phase 2)                   │       │
 │  └─────────────────────────────────────────────────────┘       │
 │                                                                 │
@@ -543,41 +547,196 @@ function renderDiveProfileDOM(containerId, samples, metadata) {
 
 ### Part 4: UI Integration
 
-**Add to Diagnostics Tab:**
-```html
-<div id="diag" class="section">
-    <!-- Existing byte hunter code -->
+**Add New "Dive History" Tab:**
 
-    <!-- New dive log section -->
-    <div class="card">
-        <h3>Dive Log Download</h3>
-        <button class="btn-main" onclick="downloadDiveLogs()">
-            Download All Dive Logs
+First, add to the tab navigation (in HTML):
+```html
+<div class="tabs">
+    <button class="tab active" onclick="tab('gen')">General</button>
+    <button class="tab" onclick="tab('env')">Environment</button>
+    <button class="tab" onclick="tab('scuba')">Scuba</button>
+    <button class="tab" onclick="tab('free')">Freedive</button>
+    <button class="tab" onclick="tab('history')">Dive History</button>
+    <button class="tab" onclick="tab('diag')">Diagnostics</button>
+</div>
+```
+
+Then add the Dive History section:
+```html
+<!-- Dive History Section -->
+<div id="history" class="section">
+    <!-- Loading state (shown during download) -->
+    <div id="historyLoading" style="display:none; text-align:center; padding:40px;">
+        <p id="historyLoadingStatus">Loading dive history...</p>
+        <div style="width:100%; max-width:400px; margin:20px auto; background:#ddd; height:20px; border-radius:10px;">
+            <div id="historyLoadingBar" style="width:0%; background:var(--blue); height:100%; border-radius:10px; transition:width 0.3s;"></div>
+        </div>
+    </div>
+
+    <!-- Empty state (no dives in memory) -->
+    <div id="historyEmpty" class="card" style="text-align:center;">
+        <h3>No Dive History</h3>
+        <p>Click the button below to download your dive logs from the device.</p>
+        <button class="btn-main" onclick="loadDiveHistory()">
+            Load Dive History
         </button>
-        <div id="downloadProgress" style="display:none;">
-            <p id="downloadStatus">Downloading...</p>
-            <div style="width:100%; background:#ddd; height:20px; border-radius:10px;">
-                <div id="downloadBar" style="width:0%; background:var(--blue); height:100%; border-radius:10px;"></div>
+    </div>
+
+    <!-- Dive viewer (shown when dives are loaded) -->
+    <div id="historyViewer" style="display:none;">
+        <!-- Navigation header -->
+        <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:20px;">
+            <button class="btn-nav" onclick="previousDive()" id="btnPrevDive">
+                ← Previous
+            </button>
+
+            <div style="text-align:center;">
+                <div id="diveCounter" style="font-size:14px; color:#6c757d; margin-bottom:5px;">
+                    Dive 1 of 15
+                </div>
+                <div id="diveMetaSummary" style="font-size:12px; color:#adb5bd;">
+                    2025/12/16 14:30 • 18.5m • 45min
+                </div>
+            </div>
+
+            <button class="btn-nav" onclick="nextDive()" id="btnNextDive">
+                Next →
+            </button>
+        </div>
+
+        <!-- Dive metadata card -->
+        <div class="card" id="diveMetadataCard">
+            <div style="display:grid; grid-template-columns:1fr 1fr; gap:10px; font-size:14px;">
+                <div>
+                    <strong>Date:</strong> <span id="diveDateDisplay"></span>
+                </div>
+                <div>
+                    <strong>Mode:</strong> <span id="diveModeDisplay"></span>
+                </div>
+                <div>
+                    <strong>Max Depth:</strong> <span id="diveMaxDepthDisplay"></span>
+                </div>
+                <div>
+                    <strong>Duration:</strong> <span id="diveDurationDisplay"></span>
+                </div>
+                <div>
+                    <strong>Min Temp:</strong> <span id="diveMinTempDisplay"></span>
+                </div>
+                <div>
+                    <strong>O₂ Mix:</strong> <span id="diveO2Display"></span>
+                </div>
+            </div>
+        </div>
+
+        <!-- SVG dive profile graph -->
+        <div class="card">
+            <div id="diveGraphContainer"></div>
+        </div>
+
+        <!-- Export options (future) -->
+        <div class="card" style="display:none;" id="exportOptions">
+            <h3>Export Options</h3>
+            <div style="display:grid; grid-template-columns:1fr 1fr; gap:10px;">
+                <button class="btn-main" onclick="exportCurrentDiveToSVG()">
+                    Export as SVG
+                </button>
+                <button class="btn-main" onclick="exportAllDivesToUDDF()">
+                    Export All to UDDF
+                </button>
             </div>
         </div>
     </div>
 
-    <div id="diveList" style="display:none;">
-        <h3>Downloaded Dives</h3>
-        <div id="diveCards"></div>
-    </div>
-
-    <!-- SVG container for dive profile -->
-    <div id="diveGraphContainer" style="display:none; margin-top:20px;"></div>
-
     <!-- Tooltip for interactive hover (optional) -->
     <div id="diveTooltip" style="display:none; position:absolute; background:#333; color:white; padding:5px 10px; border-radius:5px; font-size:12px; pointer-events:none; z-index:1000;"></div>
 </div>
+
+<style>
+/* Navigation button styles */
+.btn-nav {
+    padding: 10px 20px;
+    background: white;
+    border: 2px solid var(--blue);
+    color: var(--blue);
+    border-radius: 8px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.2s;
+    font-family: inherit;
+}
+
+.btn-nav:hover {
+    background: var(--blue);
+    color: white;
+}
+
+.btn-nav:disabled {
+    opacity: 0.3;
+    cursor: not-allowed;
+    border-color: #ccc;
+    color: #ccc;
+}
+
+.btn-nav:disabled:hover {
+    background: white;
+    color: #ccc;
+}
+</style>
 ```
 
 **Orchestration Functions:**
 
 ```javascript
+// =============================================================================
+// STATE MANAGEMENT
+// =============================================================================
+
+// Current dive index being viewed
+let currentDiveIndex = 0;
+
+// =============================================================================
+// TAB NAVIGATION
+// =============================================================================
+
+/**
+ * Extended tab() function to handle Dive History tab.
+ * When user clicks "Dive History", check if data is already loaded.
+ */
+function tab(section) {
+    // Hide all sections
+    document.querySelectorAll('.section').forEach(s => s.style.display = 'none');
+
+    // Remove active class from all tabs
+    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+
+    // Show selected section
+    document.getElementById(section).style.display = 'block';
+
+    // Add active class to clicked tab
+    event.target.classList.add('active');
+
+    // Special handling for Dive History tab
+    if (section === 'history') {
+        onDiveHistoryTabOpened();
+    }
+}
+
+/**
+ * Called when Dive History tab is opened.
+ * Checks if data is cached, otherwise prompts to load.
+ */
+function onDiveHistoryTabOpened() {
+    if (diveDatabase.dives.length > 0) {
+        // Data already loaded, show viewer
+        showHistoryViewer();
+    } else {
+        // No data, show empty state
+        document.getElementById('historyEmpty').style.display = 'block';
+        document.getElementById('historyLoading').style.display = 'none';
+        document.getElementById('historyViewer').style.display = 'none';
+    }
+}
+
 // =============================================================================
 // PHASE 1: DATA ACQUISITION
 // =============================================================================
@@ -586,10 +745,11 @@ function renderDiveProfileDOM(containerId, samples, metadata) {
  * Initiates BLE download of all dive logs from device.
  * This is the entry point for Phase 1.
  */
-async function downloadDiveLogs() {
-    // Show progress UI
-    document.getElementById('downloadProgress').style.display = 'block';
-    document.getElementById('downloadStatus').innerText = 'Requesting header...';
+async function loadDiveHistory() {
+    // Hide empty state, show loading
+    document.getElementById('historyEmpty').style.display = 'none';
+    document.getElementById('historyLoading').style.display = 'block';
+    document.getElementById('historyLoadingStatus').innerText = 'Requesting dive headers...';
 
     // Clear state
     dumpState.active = true;
@@ -608,7 +768,7 @@ async function downloadDiveLogs() {
  * This completes Phase 1 and transitions to Phase 2.
  */
 function processDiveLogs() {
-    document.getElementById('downloadStatus').innerText = 'Processing...';
+    document.getElementById('historyLoadingStatus').innerText = 'Processing dive data...';
 
     // Separate header and body packets from raw BLE stream
     const headerHex = dumpState.packets
@@ -634,11 +794,12 @@ function processDiveLogs() {
 
     console.log(`Phase 1 complete: ${diveDatabase.dives.length} dives stored in memory`);
 
-    // Hide download UI
-    document.getElementById('downloadProgress').style.display = 'none';
+    // Hide loading UI
+    document.getElementById('historyLoading').style.display = 'none';
 
-    // Transition to Phase 2: Show dive list
-    showDiveList();
+    // Transition to Phase 2: Show dive viewer
+    currentDiveIndex = 0;  // Start with first dive
+    showHistoryViewer();
 }
 
 // =============================================================================
@@ -646,43 +807,65 @@ function processDiveLogs() {
 // =============================================================================
 
 /**
- * Displays list of available dives from memory.
+ * Shows the dive history viewer UI and displays the current dive.
  * Consumes data from Phase 1 (diveDatabase).
  */
-function showDiveList() {
+function showHistoryViewer() {
     const dives = diveDatabase.dives;
 
     if (dives.length === 0) {
-        log('No dives found in memory. Download first.', 'warn');
+        log('No dives found in memory.', 'warn');
         return;
     }
 
-    const diveCards = document.getElementById('diveCards');
-    diveCards.innerHTML = '';
+    // Show viewer UI
+    document.getElementById('historyEmpty').style.display = 'none';
+    document.getElementById('historyLoading').style.display = 'none';
+    document.getElementById('historyViewer').style.display = 'block';
 
-    dives.forEach((dive, index) => {
-        const h = dive.header;
-        const card = document.createElement('div');
-        card.className = 'card';
-        card.style.cursor = 'pointer';
-        card.innerHTML = `
-            <h4>Dive #${h.logNumber}</h4>
-            <p>${h.date.year}/${h.date.month}/${h.date.day} ${h.date.hour}:${String(h.date.minute).padStart(2, '0')}</p>
-            <p>Max Depth: ${h.maxDepthMeters.toFixed(1)}m | Duration: ${h.durationMinutes}min</p>
-        `;
-        card.onclick = () => viewDive(index);
-        diveCards.appendChild(card);
-    });
-
-    document.getElementById('diveList').style.display = 'block';
+    // Display the current dive
+    displayDive(currentDiveIndex);
 }
 
 /**
- * Renders SVG visualization for a specific dive.
- * Lazy-loads samples from cached body hex if not already parsed.
+ * Displays a specific dive by index.
+ * Updates metadata, navigation state, and renders SVG.
  */
-function viewDive(diveIndex) {
-    const dive = diveDatabase.dives[diveIndex];
+function displayDive(index) {
+    const dives = diveDatabase.dives;
+
+    // Bounds check
+    if (index < 0 || index >= dives.length) return;
+
+    currentDiveIndex = index;
+    const dive = dives[index];
+    const h = dive.header;
+
+    // Update dive counter
+    document.getElementById('diveCounter').innerText =
+        `Dive ${index + 1} of ${dives.length}`;
+
+    // Update meta summary
+    const dateStr = `${h.date.year}/${String(h.date.month).padStart(2, '0')}/${String(h.date.day).padStart(2, '0')} ${String(h.date.hour).padStart(2, '0')}:${String(h.date.minute).padStart(2, '0')}`;
+    document.getElementById('diveMetaSummary').innerText =
+        `${dateStr} • ${h.maxDepthMeters.toFixed(1)}m • ${h.durationMinutes}min`;
+
+    // Update detailed metadata
+    document.getElementById('diveDateDisplay').innerText = dateStr;
+    document.getElementById('diveModeDisplay').innerText =
+        ['Scuba', 'Gauge', 'Freedive'][h.mode] || 'Unknown';
+    document.getElementById('diveMaxDepthDisplay').innerText =
+        `${h.maxDepthMeters.toFixed(1)}m`;
+    document.getElementById('diveDurationDisplay').innerText =
+        `${h.durationMinutes}min`;
+    document.getElementById('diveMinTempDisplay').innerText =
+        `${h.minTempCelsius.toFixed(1)}°C`;
+    document.getElementById('diveO2Display').innerText =
+        `${h.oxygenPercent}%`;
+
+    // Update navigation button states
+    document.getElementById('btnPrevDive').disabled = (index === 0);
+    document.getElementById('btnNextDive').disabled = (index === dives.length - 1);
 
     // Lazy-load samples if not already parsed
     if (!dive.samples) {
@@ -690,13 +873,34 @@ function viewDive(diveIndex) {
         console.log(`Parsed ${dive.samples.length} samples for dive #${dive.header.logNumber}`);
     }
 
-    // Render SVG
-    const container = document.getElementById('diveGraphContainer');
-    container.style.display = 'block';
+    // Render SVG graph
     renderDiveProfile('diveGraphContainer', dive.samples, dive.header);
+}
 
-    // Scroll to graph
-    container.scrollIntoView({ behavior: 'smooth' });
+/**
+ * Navigate to previous dive.
+ */
+function previousDive() {
+    if (currentDiveIndex > 0) {
+        displayDive(currentDiveIndex - 1);
+    }
+}
+
+/**
+ * Navigate to next dive.
+ */
+function nextDive() {
+    if (currentDiveIndex < diveDatabase.dives.length - 1) {
+        displayDive(currentDiveIndex + 1);
+    }
+}
+
+/**
+ * Navigate to a specific dive by index.
+ * Useful for future features like dive list or search.
+ */
+function goToDive(index) {
+    displayDive(index);
 }
 
 // =============================================================================
