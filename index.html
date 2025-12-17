@@ -867,39 +867,7 @@
                         if (cmd === '42' || cmd === '44') {
                             // Collect dive log packets
                             dumpState.packets.push(clean);
-
-                            // Update progress bar
-                            const progress = Math.min((dumpState.packets.length / 20) * 100, 95);
-                            document.getElementById('historyLoadingBar').style.width = progress + '%';
-
-                            if (cmd === '42') {
-                                // Header packet received
-                                document.getElementById('historyLoadingStatus').innerText = 'Receiving dive list...';
-
-                                // If header-only mode, finish after a short delay
-                                if (dumpState.headerOnly) {
-                                    setTimeout(() => {
-                                        if (dumpState.active && dumpState.headerOnly) {
-                                            dumpState.active = false;
-                                            document.getElementById('historyLoadingBar').style.width = '100%';
-                                            processHeadersOnly();
-                                        }
-                                    }, 1500);  // Wait for all header packets
-                                }
-                            } else if (cmd === '44') {
-                                // Body packet received
-                                document.getElementById('historyLoadingStatus').innerText = 'Receiving dive profiles...';
-
-                                // Check if download complete after body packets
-                                setTimeout(() => {
-                                    if (dumpState.active && !dumpState.headerOnly) {
-                                        dumpState.active = false;
-                                        document.getElementById('historyLoadingBar').style.width = '100%';
-                                        processFullDiveLogs();
-                                    }
-                                }, 3000);  // Wait for all body packets
-                            }
-
+                            // Don't auto-finish - let loadDiveHistory/downloadBodyData control flow
                             return; // Don't process dive log packets normally
                         }
                     }
@@ -1718,25 +1686,58 @@
             // =========================================================================
 
             /**
-             * Initiates BLE download of dive headers only (fast, small)
+             * Initiates BLE download of dive headers only (sequential requests)
              * Body data downloaded on-demand when viewing profiles
              */
             async function loadDiveHistory() {
                 // Hide empty state, show loading
                 document.getElementById('historyEmpty').style.display = 'none';
                 document.getElementById('historyLoading').style.display = 'block';
-                document.getElementById('historyLoadingStatus').innerText = 'Downloading dive list...';
+                document.getElementById('historyLoadingStatus').innerText = 'Scanning for dives...';
 
                 // Clear state
                 dumpState.active = true;
                 dumpState.phase = 0;
                 dumpState.packets = [];
-                dumpState.headerOnly = true;  // Only download headers initially
+                dumpState.headerOnly = true;
 
-                // Request header (metadata about all dives - small, fast)
-                await sendStatic("#41BD0200", "Request Dive Headers");
+                // Request headers sequentially (device requires individual requests)
+                const MAX_DIVES = 200;  // Upper limit to prevent infinite loop
+                const TARGET = 191;     // Target constant for command 0x41
+                const LEN = 2;
 
-                // Body will be requested separately when needed
+                log('Starting dive header scan...', 'log-info');
+
+                for (let i = 1; i <= MAX_DIVES; i++) {
+                    // Update progress
+                    const progress = Math.min((i / 50) * 100, 95);  // Assume ~50 dives max for progress
+                    document.getElementById('historyLoadingBar').style.width = progress + '%';
+                    document.getElementById('historyLoadingStatus').innerText = `Scanning dive #${i}...`;
+
+                    // Calculate checksum for this dive number
+                    const payload = i;
+                    const checksum = (TARGET - (LEN + payload)) & 0xFF;
+                    const cmd = "#41" + checksum.toString(16).padStart(2, '0') + "02" + payload.toString(16).padStart(2, '0');
+
+                    await sendStatic(cmd, `Request Header #${i}`);
+
+                    // Wait for response (device needs time between requests)
+                    await new Promise(r => setTimeout(r, 800));
+
+                    // Check if we got empty response (all 0xFF = no more dives)
+                    const lastPacket = dumpState.packets[dumpState.packets.length - 1];
+                    if (lastPacket && lastPacket.includes('FFFFFFFFFF')) {
+                        console.log(`No more dives after #${i - 1}`);
+                        break;
+                    }
+                }
+
+                // Finish processing
+                document.getElementById('historyLoadingBar').style.width = '100%';
+                document.getElementById('historyLoadingStatus').innerText = 'Processing dive list...';
+
+                dumpState.active = false;
+                await processHeadersOnly();
             }
 
             /**
