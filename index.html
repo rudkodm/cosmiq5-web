@@ -869,38 +869,38 @@
                             dumpState.packets.push(clean);
 
                             // Update progress bar
-                            const progress = Math.min((dumpState.packets.length / 100) * 100, 95);
+                            const progress = Math.min((dumpState.packets.length / 20) * 100, 95);
                             document.getElementById('historyLoadingBar').style.width = progress + '%';
 
-                            if (cmd === '42' && dumpState.phase === 0) {
-                                // Header packet received, request body after collecting headers
-                                document.getElementById('historyLoadingStatus').innerText = 'Receiving dive headers...';
+                            if (cmd === '42') {
+                                // Header packet received
+                                document.getElementById('historyLoadingStatus').innerText = 'Receiving dive list...';
 
-                                // Check if this might be the last header packet (heuristic: looks like end)
-                                setTimeout(() => {
-                                    if (dumpState.phase === 0) {
-                                        dumpState.phase = 1;
-                                        document.getElementById('historyLoadingStatus').innerText = 'Requesting dive data...';
-                                        sendStatic("#43BB0200", "Request Dive Body");
-                                    }
-                                }, 1000);
+                                // If header-only mode, finish after a short delay
+                                if (dumpState.headerOnly) {
+                                    setTimeout(() => {
+                                        if (dumpState.active && dumpState.headerOnly) {
+                                            dumpState.active = false;
+                                            document.getElementById('historyLoadingBar').style.width = '100%';
+                                            processHeadersOnly();
+                                        }
+                                    }, 1500);  // Wait for all header packets
+                                }
                             } else if (cmd === '44') {
-                                document.getElementById('historyLoadingStatus').innerText = 'Receiving dive data...';
+                                // Body packet received
+                                document.getElementById('historyLoadingStatus').innerText = 'Receiving dive profiles...';
+
+                                // Check if download complete after body packets
+                                setTimeout(() => {
+                                    if (dumpState.active && !dumpState.headerOnly) {
+                                        dumpState.active = false;
+                                        document.getElementById('historyLoadingBar').style.width = '100%';
+                                        processFullDiveLogs();
+                                    }
+                                }, 3000);  // Wait for all body packets
                             }
 
                             return; // Don't process dive log packets normally
-                        }
-
-                        // Check if we should finish (no packets for a while after starting)
-                        if (dumpState.phase === 1 && dumpState.packets.filter(p => p.startsWith('44')).length > 10) {
-                            // We have body packets, check if download is complete
-                            setTimeout(() => {
-                                if (dumpState.active) {
-                                    dumpState.active = false;
-                                    document.getElementById('historyLoadingBar').style.width = '100%';
-                                    processDiveLogs();
-                                }
-                            }, 3000);
                         }
                     }
 
@@ -1585,8 +1585,9 @@
             // State for BLE download
             const dumpState = {
                 active: false,
-                phase: 0,           // 0=header, 1=body
-                packets: []         // Collected hex strings
+                phase: 0,           // 0=header-only, 1=body-downloading
+                packets: [],        // Collected hex strings
+                headerOnly: false   // If true, only downloading headers
             };
 
             // =========================================================================
@@ -1717,73 +1718,118 @@
             // =========================================================================
 
             /**
-             * Initiates BLE download of all dive logs from device
+             * Initiates BLE download of dive headers only (fast, small)
+             * Body data downloaded on-demand when viewing profiles
              */
             async function loadDiveHistory() {
                 // Hide empty state, show loading
                 document.getElementById('historyEmpty').style.display = 'none';
                 document.getElementById('historyLoading').style.display = 'block';
-                document.getElementById('historyLoadingStatus').innerText = 'Requesting dive headers...';
+                document.getElementById('historyLoadingStatus').innerText = 'Downloading dive list...';
 
                 // Clear state
                 dumpState.active = true;
                 dumpState.phase = 0;
                 dumpState.packets = [];
+                dumpState.headerOnly = true;  // Only download headers initially
 
-                // Request header (metadata about all dives)
+                // Request header (metadata about all dives - small, fast)
                 await sendStatic("#41BD0200", "Request Dive Headers");
 
-                // Body request happens automatically in handleRX when header completes
+                // Body will be requested separately when needed
             }
 
             /**
-             * Processes downloaded hex data and stores it in memory
-             * This completes Phase 1 and transitions to Phase 2
+             * Downloads body data (large, slow) - called on-demand
              */
-            async function processDiveLogs() {
-                try {
-                    document.getElementById('historyLoadingStatus').innerText = 'Processing dive data...';
+            async function downloadBodyData() {
+                document.getElementById('historyLoadingStatus').innerText = 'Downloading dive profiles...';
+                document.getElementById('historyLoading').style.display = 'block';
 
-                    // Separate header and body packets from raw BLE stream
+                // Clear packets and prepare for body download
+                dumpState.active = true;
+                dumpState.phase = 1;
+                dumpState.packets = dumpState.packets.filter(p => p.startsWith('42')); // Keep headers
+                dumpState.headerOnly = false;
+
+                // Request body (all dive sample data - large)
+                await sendStatic("#43BB0200", "Request Dive Body");
+            }
+
+            /**
+             * Processes header-only download (fast, shows dive list without profiles)
+             */
+            async function processHeadersOnly() {
+                try {
+                    document.getElementById('historyLoadingStatus').innerText = 'Processing dive list...';
+
+                    // Extract header packets only
                     const headerHex = dumpState.packets
                         .filter(p => p.startsWith('42'))
                         .map(p => p.substring(6))  // Strip command/checksum/length
                         .join('');
 
+                    // Parse headers to get dive metadata
+                    const headers = parseHeaders(headerHex);
+
+                    // Create dive objects (without samples)
+                    const dives = headers.map(header => ({
+                        logNumber: header.logNumber,
+                        header: header,
+                        samples: null
+                    }));
+
+                    // Cache in memory only (no body hex yet)
+                    cachedDives = dives;
+                    cachedBodyHex = '';  // Empty until body downloaded
+
+                    console.log(`Headers processed: ${dives.length} dives found`);
+
+                    // Hide loading UI
+                    document.getElementById('historyLoading').style.display = 'none';
+
+                    // Show dive list with prompt to download body
+                    showDiveListOnly();
+
+                } catch (error) {
+                    console.error('Error processing headers:', error);
+                    log('Error processing dive list: ' + error.message, 'log-err');
+                    document.getElementById('historyLoadingStatus').innerText = 'Error processing dive list';
+                }
+            }
+
+            /**
+             * Processes full download (headers + body, shows profiles)
+             */
+            async function processFullDiveLogs() {
+                try {
+                    document.getElementById('historyLoadingStatus').innerText = 'Processing dive profiles...';
+
+                    // Extract body packets
                     const bodyHex = dumpState.packets
                         .filter(p => p.startsWith('44'))
                         .map(p => p.substring(6))
                         .join('');
 
-                    // Parse headers to get dive metadata
-                    const headers = parseHeaders(headerHex);
+                    // Store in IndexedDB for persistence
+                    await diveStorage.storeDives(cachedDives, bodyHex);
 
-                    // Create dive objects (without samples yet)
-                    const dives = headers.map(header => ({
-                        logNumber: header.logNumber,  // Used as key in IndexedDB
-                        header: header,
-                        samples: null  // Lazy-load samples when needed
-                    }));
-
-                    // Store in IndexedDB for persistence across sessions
-                    await diveStorage.storeDives(dives, bodyHex);
-
-                    // Cache in memory for fast access during this session
-                    cachedDives = dives;
+                    // Update cache with body hex
                     cachedBodyHex = bodyHex;
 
-                    console.log(`Phase 1 complete: ${dives.length} dives stored in IndexedDB and cached`);
+                    console.log(`Body data processed and stored in IndexedDB`);
 
                     // Hide loading UI
                     document.getElementById('historyLoading').style.display = 'none';
 
-                    // Transition to Phase 2: Show dive viewer
-                    currentDiveIndex = 0;  // Start with first dive
+                    // Show dive viewer with profiles
+                    currentDiveIndex = 0;
                     showHistoryViewer();
+
                 } catch (error) {
-                    console.error('Error processing dives:', error);
-                    log('Error processing dives: ' + error.message, 'log-err');
-                    document.getElementById('historyLoadingStatus').innerText = 'Error processing dives';
+                    console.error('Error processing body data:', error);
+                    log('Error processing dive profiles: ' + error.message, 'log-err');
+                    document.getElementById('historyLoadingStatus').innerText = 'Error processing dive profiles';
                 }
             }
 
@@ -1792,7 +1838,41 @@
             // =========================================================================
 
             /**
-             * Shows the dive history viewer UI and displays the current dive
+             * Shows dive list without profiles (header-only mode)
+             * Displays message that body data needs to be downloaded
+             */
+            function showDiveListOnly() {
+                if (cachedDives.length === 0) {
+                    log('No dives found in cache.', 'warn');
+                    return;
+                }
+
+                // Show viewer UI but with download prompt
+                document.getElementById('historyEmpty').style.display = 'none';
+                document.getElementById('historyLoading').style.display = 'none';
+                document.getElementById('historyViewer').style.display = 'block';
+
+                // Show first dive metadata (without profile)
+                currentDiveIndex = 0;
+                displayDiveMetadataOnly(currentDiveIndex);
+
+                // Show download prompt in graph container
+                const container = document.getElementById('diveGraphContainer');
+                container.innerHTML = `
+                    <div style="text-align:center; padding:40px; background:white; border-radius:10px;">
+                        <h3 style="margin-top:0;">Profile Data Not Downloaded</h3>
+                        <p style="color:#666;">Dive list loaded (${cachedDives.length} dives found)</p>
+                        <p style="color:#666;">To view dive profiles, download the full data:</p>
+                        <button class="btn-main" onclick="downloadBodyData()" style="max-width:300px; margin:20px auto;">
+                            Download Dive Profiles
+                        </button>
+                        <p style="font-size:12px; color:#aaa;">This may take a minute for large dive logs</p>
+                    </div>
+                `;
+            }
+
+            /**
+             * Shows dive viewer with profiles (full mode)
              */
             function showHistoryViewer() {
                 if (cachedDives.length === 0) {
@@ -1805,8 +1885,47 @@
                 document.getElementById('historyLoading').style.display = 'none';
                 document.getElementById('historyViewer').style.display = 'block';
 
-                // Display the current dive
+                // Display the current dive with profile
                 displayDive(currentDiveIndex);
+            }
+
+            /**
+             * Displays dive metadata only (no profile graph)
+             * Used when body data not yet downloaded
+             */
+            function displayDiveMetadataOnly(index) {
+                // Bounds check
+                if (index < 0 || index >= cachedDives.length) return;
+
+                currentDiveIndex = index;
+                const dive = cachedDives[index];
+                const h = dive.header;
+
+                // Update dive counter
+                document.getElementById('diveCounter').innerText =
+                    `Dive ${index + 1} of ${cachedDives.length}`;
+
+                // Update meta summary
+                const dateStr = `${h.date.year}/${String(h.date.month).padStart(2, '0')}/${String(h.date.day).padStart(2, '0')} ${String(h.date.hour).padStart(2, '0')}:${String(h.date.minute).padStart(2, '0')}`;
+                document.getElementById('diveMetaSummary').innerText =
+                    `${dateStr} • ${h.maxDepthMeters.toFixed(1)}m • ${h.durationMinutes}min`;
+
+                // Update detailed metadata
+                document.getElementById('diveDateDisplay').innerText = dateStr;
+                document.getElementById('diveModeDisplay').innerText =
+                    ['Scuba', 'Gauge', 'Freedive'][h.mode] || 'Unknown';
+                document.getElementById('diveMaxDepthDisplay').innerText =
+                    `${h.maxDepthMeters.toFixed(1)}m`;
+                document.getElementById('diveDurationDisplay').innerText =
+                    `${h.durationMinutes}min`;
+                document.getElementById('diveMinTempDisplay').innerText =
+                    `${h.minTempCelsius.toFixed(1)}°C`;
+                document.getElementById('diveO2Display').innerText =
+                    `${h.oxygenPercent}%`;
+
+                // Update navigation button states
+                document.getElementById('btnPrevDive').disabled = (index === 0);
+                document.getElementById('btnNextDive').disabled = (index === cachedDives.length - 1);
             }
 
             /**
@@ -1862,7 +1981,12 @@
              */
             function previousDive() {
                 if (currentDiveIndex > 0) {
-                    displayDive(currentDiveIndex - 1);
+                    const newIndex = currentDiveIndex - 1;
+                    if (cachedBodyHex) {
+                        displayDive(newIndex);
+                    } else {
+                        displayDiveMetadataOnly(newIndex);
+                    }
                 }
             }
 
@@ -1871,7 +1995,12 @@
              */
             function nextDive() {
                 if (currentDiveIndex < cachedDives.length - 1) {
-                    displayDive(currentDiveIndex + 1);
+                    const newIndex = currentDiveIndex + 1;
+                    if (cachedBodyHex) {
+                        displayDive(newIndex);
+                    } else {
+                        displayDiveMetadataOnly(newIndex);
+                    }
                 }
             }
 
@@ -1957,8 +2086,12 @@
             async function onDiveHistoryTabOpened() {
                 // Check in-memory cache first
                 if (cachedDives.length > 0) {
-                    // Data already loaded in this session, show viewer
-                    showHistoryViewer();
+                    // Data already loaded in this session
+                    if (cachedBodyHex) {
+                        showHistoryViewer();  // Has profiles
+                    } else {
+                        showDiveListOnly();   // Metadata only
+                    }
                     return;
                 }
 
@@ -1969,7 +2102,7 @@
                     if (hasDives) {
                         // Load from IndexedDB
                         document.getElementById('historyLoading').style.display = 'block';
-                        document.getElementById('historyLoadingStatus').innerText = 'Loading dive history from storage...';
+                        document.getElementById('historyLoadingStatus').innerText = 'Loading dive history...';
 
                         cachedDives = await diveStorage.getDives();
                         cachedBodyHex = await diveStorage.getRawBodyHex();
@@ -1977,7 +2110,13 @@
                         console.log(`Loaded ${cachedDives.length} dives from IndexedDB`);
 
                         document.getElementById('historyLoading').style.display = 'none';
-                        showHistoryViewer();
+
+                        // Check if we have body data
+                        if (cachedBodyHex) {
+                            showHistoryViewer();  // Full profiles available
+                        } else {
+                            showDiveListOnly();   // Metadata only
+                        }
                     } else {
                         // No data, show empty state
                         document.getElementById('historyEmpty').style.display = 'block';
