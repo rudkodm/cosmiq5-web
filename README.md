@@ -50,30 +50,7 @@ This entire project was "vibecoded" with Gemini Pro 3\. The code was generated t
 5. View the interactive chart showing your depth profile over time.
 6. Use **"↻ Reload Dive Profile"** if you need to re-fetch the data.
 
-**Note:** Dive data is stored locally in your browser (IndexedDB), so it persists across sessions. Your dive history is automatically sorted by date with the most recent dive first.
-
-## **🛠️ Technical Details**
-
-### **Dive History Implementation**
-
-The dive history feature uses a two-phase approach:
-- **Phase 1:** Fast header-only scan downloads 36-byte headers for all dives (showing metadata only)
-- **Phase 2:** On-demand body data download for individual dives (fetches detailed depth samples)
-
-This prevents browser crashes when handling large dive logs by only downloading full profile data when needed.
-
-### **Data Storage**
-
-- Uses IndexedDB for persistent local storage
-- Dive headers and samples stored separately per dive
-- No data sent to external servers (100% client-side)
-
-### **Protocol Details**
-
-- BLE communication using Web Bluetooth API
-- 36-byte dive headers (not 72 as initially assumed)
-- 4-byte depth samples: [Marker_Low][Marker_High][Depth_Low][Depth_High]
-- Depth values in centimeters (divide by 100 for meters)
+**Note:** Dive data is stored locally in your browser, so it persists across sessions. Dives are automatically sorted by date (most recent first).
 
 ## **⚠️ Important Safety Warning**
 
@@ -89,11 +66,8 @@ Diving involves significant risks, including decompression sickness, oxygen toxi
 
 ## **📝 Recent Updates**
 
-### Dive History Features (December 2024)
-- ✅ Fixed header parsing to correctly read all dives (36-byte headers, not 72)
-- ✅ Implemented on-demand individual dive profile downloads
-- ✅ Added date-based sorting (most recent first)
-- ✅ Fixed mode parsing (Scuba vs Freedive vs Gauge)
-- ✅ Added persistent storage with IndexedDB
-- ✅ Interactive depth/time charts with SVG rendering
-- ✅ Reload functionality for dive profiles
+### December 2024 \- Dive History
+* Full dive log viewing and download functionality.
+* Interactive depth/time charts for each dive.
+* Smart on-demand loading to prevent browser crashes.
+* Local storage for persistent dive history.
