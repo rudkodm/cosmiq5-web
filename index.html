@@ -767,6 +767,11 @@
                     .forEach((e) => e.classList.remove("active"));
                 document.getElementById(id).classList.add("active");
                 event.target.classList.add("active");
+
+                // Special handling for Dive History tab
+                if (id === 'history') {
+                    onDiveHistoryTabOpened();
+                }
             }
             function upd(id, val) {
                 document.getElementById(id).innerText = val;
@@ -1790,22 +1795,6 @@
 
                 // Insert SVG into container
                 container.innerHTML = svg;
-            }
-
-            // =========================================================================
-            // TAB NAVIGATION - EXTENDED FOR DIVE HISTORY
-            // =========================================================================
-
-            // Override existing tab() function to handle history tab
-            const originalTab = tab;
-            function tab(id) {
-                // Call original tab function
-                originalTab(id);
-
-                // Special handling for Dive History tab
-                if (id === 'history') {
-                    onDiveHistoryTabOpened();
-                }
             }
 
             /**
